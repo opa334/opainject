@@ -223,7 +223,7 @@ static kern_return_t runPayload(task_t task, uint8_t* payload, size_t payloadSiz
 	thread_act_t remoteThread;
 
 	struct arm_unified_thread_state remoteThreadState64;
-    bzero(&remoteThreadState64, sizeof(struct arm_unified_thread_state));
+	bzero(&remoteThreadState64, sizeof(struct arm_unified_thread_state));
 
 	remoteThreadState64.ash.flavor = ARM_THREAD_STATE64;
 	remoteThreadState64.ash.count = ARM_THREAD_STATE64_COUNT;
@@ -252,23 +252,23 @@ static kern_return_t runPayload(task_t task, uint8_t* payload, size_t payloadSiz
 	printf("Started thread, now waiting for it to finish.\n");
 
 	mach_msg_type_number_t thread_state_count = ARM_THREAD_STATE64_COUNT;
-    for (;;) {
-	    kr = thread_get_state(remoteThread, ARM_THREAD_STATE64, (thread_state_t)&remoteThreadState64.ts_64, &thread_state_count);
-        if (kr != KERN_SUCCESS) {
-            printf("Error getting stub thread state: error %s", mach_error_string(kr));
-            break;
-        }
+	for (;;) {
+		kr = thread_get_state(remoteThread, ARM_THREAD_STATE64, (thread_state_t)&remoteThreadState64.ts_64, &thread_state_count);
+		if (kr != KERN_SUCCESS) {
+			printf("Error getting stub thread state: error %s", mach_error_string(kr));
+			break;
+		}
 
 		// Check whether x9 is 0x42 (exit code)
-        if (remoteThreadState64.ts_64.__x[9] == 0x42) {
-            printf("Stub thread finished\n");
-            kr = thread_terminate(remoteThread);
-            if (kr != KERN_SUCCESS) {
-                printf("Error terminating stub thread: error %s\n", mach_error_string(kr));
-            }
-            break;
-        }
-    }
+		if (remoteThreadState64.ts_64.__x[9] == 0x42) {
+			printf("Stub thread finished\n");
+			kr = thread_terminate(remoteThread);
+			if (kr != KERN_SUCCESS) {
+				printf("Error terminating stub thread: error %s\n", mach_error_string(kr));
+			}
+			break;
+		}
+	}
 
 	printf("Thread finished, we done here.\n");
 

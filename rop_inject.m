@@ -55,10 +55,10 @@ struct arm64_thread_full_state {
 	arm_neon_state64_t      neon;
 	arm_debug_state64_t     debug;
 	uint32_t                thread_valid:1,
-	                        exception_valid:1,
-	                        neon_valid:1,
-	                        debug_valid:1,
-	                        cpmu_valid:1;
+							exception_valid:1,
+							neon_valid:1,
+							debug_valid:1,
+							cpmu_valid:1;
 };
 
 struct arm64_thread_full_state* thread_save_state_arm64(thread_act_t thread)
@@ -316,7 +316,7 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	thread_act_t bootstrapThread;
 
 	struct arm_unified_thread_state bootstrapThreadState;
-    bzero(&bootstrapThreadState, sizeof(struct arm_unified_thread_state));
+	bzero(&bootstrapThreadState, sizeof(struct arm_unified_thread_state));
 
 	// spawn pthread to infinite loop
 	bootstrapThreadState.ash.flavor = ARM_THREAD_STATE64;
@@ -345,7 +345,7 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	struct arm_unified_thread_state stateToObserve;
 	while(1)
 	{
-	    kr = thread_get_state(bootstrapThread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
+		kr = thread_get_state(bootstrapThread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
 		if(kr != KERN_SUCCESS)
 		{
 			printf("ERROR: failed to get thread state in loop: %s\n", mach_error_string(kr));
@@ -361,14 +361,14 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 			if (kr != KERN_SUCCESS) {
 				printf("Error terminating bootstrap thread: error %s\n", mach_error_string(kr));
 			}
-            break;
-        }
-    }
+			break;
+		}
+	}
 
 	thread_act_t remotePthread = 0;
 
 	thread_act_array_t allThreads; // gather threads
-    mach_msg_type_number_t threadCount;
+	mach_msg_type_number_t threadCount;
 	kr = task_threads(task, &allThreads, &threadCount);
 	if(kr != KERN_SUCCESS)
 	{
@@ -439,7 +439,7 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 	}
 
 	va_list ap;
-    va_start(ap, numArgs);
+	va_start(ap, numArgs);
 
 	// suspend target thread
 	thread_suspend(targetThread);
@@ -535,7 +535,7 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 	struct arm_unified_thread_state stateToObserve;
 	while(1)
 	{
-	    kr = thread_get_state(targetThread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
+		kr = thread_get_state(targetThread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
 		if(kr != KERN_SUCCESS)
 		{
 			free(origThreadFullState);
@@ -546,9 +546,9 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 		// wait until pc matches with infinite loop rop gadget
 		uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(stateToObserve.ts_64);
 		if(pc == ropLoop) {
-            break;
-        }
-    }
+			break;
+		}
+	}
 
 	// extract return value from state if needed
 	if(retOut)
@@ -587,9 +587,9 @@ void prepareForMagic(task_t task, vm_address_t allImageInfoAddr)
 {
 	// FIND INFINITE LOOP ROP GADGET
 	static dispatch_once_t onceToken;
-    dispatch_once (&onceToken, ^{
-        findRopLoop(task, allImageInfoAddr);
-    });
+	dispatch_once (&onceToken, ^{
+		findRopLoop(task, allImageInfoAddr);
+	});
 	printf("[prepareForMagic] done, ropLoop: 0x%llX\n", ropLoop);
 }
 
