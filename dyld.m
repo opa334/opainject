@@ -23,7 +23,6 @@ unsigned char* readProcessMemory(task_t t, mach_vm_address_t addr, mach_msg_type
 	kern_return_t kr = vm_read(t, addr, *size, &readMem, &dataCnt);
 	if (kr != KERN_SUCCESS)
 	{
-		printf("readProcessMemory: %s\n", mach_error_string(kr));
 		return NULL;
 	}
 
@@ -302,7 +301,7 @@ vm_address_t scanMemory(task_t task, vm_address_t begin, size_t size, char* memo
 	unsigned char* buf = readProcessMemory(task, begin, &chunkSize);
 	if(!buf || (size != chunkSize))
 	{
-		printf("Error reading process memory (%llX, size:%llX)\n", (uint64_t)begin, (uint64_t)size);
+		printf("[scanMemory] WARNING: Failed to read process memory (%llX, size:%llX)\n", (uint64_t)begin, (uint64_t)size);
 		if(buf)
 		{
 			vm_deallocate(mach_task_self(), (vm_address_t)buf, chunkSize);
