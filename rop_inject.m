@@ -65,6 +65,24 @@ vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOu
 	return remoteString;
 }
 
+char *copyStringFromTask(task_t task, vm_address_t stringAddress)
+{
+	extern unsigned char* readProcessMemory(task_t t, mach_vm_address_t addr, mach_msg_type_number_t* size);
+	vm_address_t curAddress = stringAddress;
+	unsigned char buf = -1;
+	while (buf != 0) {
+		mach_msg_type_number_t size = 1;
+		unsigned char *stringBuf = readProcessMemory(task, curAddress, &size);
+		buf = *stringBuf;
+		curAddress++;
+		vm_deallocate(mach_task_self(), (vm_address_t)stringBuf, size);
+	}
+
+	vm_address_t nullByteAddress = curAddress - 1;
+	mach_msg_type_number_t stringSize = nullByteAddress - stringAddress;
+	return (char *)readProcessMemory(task, stringAddress, &stringSize);
+}
+
 void findRopLoop(task_t task, vm_address_t allImageInfoAddr)
 {
 	uint32_t inst = CFSwapInt32(0x00000014);
@@ -385,7 +403,8 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	// FIND OFFSETS
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
-	printf("[injectDylibViaRop] dlopen: 0x%llX\n", (unsigned long long)dlopenAddr);
+	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
 	// CALL DLOPEN
 	size_t remoteDylibPathSize = 0;
@@ -395,7 +414,17 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		void* dlopenRet;
 		arbCall(task, pthread, (uint64_t*)&dlopenRet, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
 		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
-		printf("[injectDylibViaRop] dlopen returned %p\n", dlopenRet);
+
+		if (dlopenRet) {
+			printf("[injectDylibViaRop] dlopen succeeded, library handle: %p\n", dlopenRet);
+		}
+		else {
+			uint64_t remoteErrorString = 0;
+			arbCall(task, pthread, (uint64_t*)&remoteErrorString, dlerrorAddr, 0);
+			char *errorString = copyStringFromTask(task, remoteErrorString);
+			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
+			vm_deallocate(mach_task_self(), (vm_address_t)errorString, strlen(errorString)+1);
+		}
 	}
 
 	thread_terminate(pthread);
