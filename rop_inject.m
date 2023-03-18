@@ -209,7 +209,7 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	return kr;
 }
 
-kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, vm_address_t funcPtr, int numArgs, ...)
+kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, bool willReturn, vm_address_t funcPtr, int numArgs, ...)
 {
 	kern_return_t kr = KERN_SUCCESS;
 	if(numArgs > 8)
@@ -308,40 +308,51 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 	thread_resume(targetThread);
 	printf("[arbCall] Started thread, waiting for it to finish...\n");
 
-	// wait for arbitary call to finish
+	// wait for arbitary call to finish (or not)
 	struct arm_unified_thread_state outState;
-	kr = wait_for_thread(targetThread, ropLoop, &outState);
-	if(kr != KERN_SUCCESS)
+	if (willReturn)
 	{
-		free(origThreadFullState);
-		printf("[arbCall] ERROR: failed to wait for thread to finish: %s\n", mach_error_string(kr));
-		return kr;
-	}
+		kr = wait_for_thread(targetThread, ropLoop, &outState);
+		if(kr != KERN_SUCCESS)
+		{
+			free(origThreadFullState);
+			printf("[arbCall] ERROR: failed to wait for thread to finish: %s\n", mach_error_string(kr));
+			return kr;
+		}
 
-	// extract return value from state if needed
-	if(retOut)
+		// extract return value from state if needed
+		if(retOut)
+		{
+			*retOut = outState.ts_64.__x[0];
+		}
+	}
+	else
 	{
-		*retOut = outState.ts_64.__x[0];
+		kr = wait_for_thread(targetThread, 0, &outState);
+		printf("[arbCall] pthread successfully did not return with code %d (%s)\n", kr, mach_error_string(kr));
 	}
 
 	// release fake stack as it's no longer needed
 	vm_deallocate(task, remoteStack, STACK_SIZE);
 
-	// suspend target thread
-	thread_suspend(targetThread);
-	thread_abort(targetThread);
-
-	// restore states of target thread to what they were before the arbitary call
-	bool restoreSuccess = thread_restore_state_arm64(targetThread, origThreadFullState);
-	if(!restoreSuccess)
+	if (willReturn)
 	{
-		printf("[arbCall] ERROR: failed to revert to old thread state\n");
-		return kr;
-	}
+		// suspend target thread
+		thread_suspend(targetThread);
+		thread_abort(targetThread);
 
-	// resume thread again, process should continue executing as before
-	//printThreadState(targetThread);
-	thread_resume(targetThread);
+		// restore states of target thread to what they were before the arbitary call
+		bool restoreSuccess = thread_restore_state_arm64(targetThread, origThreadFullState);
+		if(!restoreSuccess)
+		{
+			printf("[arbCall] ERROR: failed to revert to old thread state\n");
+			return kr;
+		}
+
+		// resume thread again, process should continue executing as before
+		//printThreadState(targetThread);
+		thread_resume(targetThread);
+	}
 
 	return kr;
 }
@@ -377,7 +388,7 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dyli
 	if(remoteExtString)
 	{
 		int64_t sandbox_extension_consume_ret = 0;
-		arbCall(task, pthread, (uint64_t*)&sandbox_extension_consume_ret, sandbox_extension_consumeAddr, 1, remoteExtString);
+		arbCall(task, pthread, (uint64_t*)&sandbox_extension_consume_ret, true, sandbox_extension_consumeAddr, 1, remoteExtString);
 		vm_deallocate(task, remoteExtString, remoteExtStringSize);
 
 		printf("[sandboxFixup] sandbox_extension_consume returned %lld\n", (int64_t)sandbox_extension_consume_ret);
@@ -404,6 +415,9 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
+	vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
+	uint64_t pthread_exitAddr = remoteDlSym(task, libSystemPthreadAddr, "_pthread_exit");
+
 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
 	// CALL DLOPEN
@@ -412,7 +426,7 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	if(remoteDylibPath)
 	{
 		void* dlopenRet;
-		arbCall(task, pthread, (uint64_t*)&dlopenRet, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
+		arbCall(task, pthread, (uint64_t*)&dlopenRet, true, dlopenAddr, 2, remoteDylibPath, RTLD_NOW);
 		vm_deallocate(task, remoteDylibPath, remoteDylibPathSize);
 
 		if (dlopenRet) {
@@ -420,12 +434,13 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		}
 		else {
 			uint64_t remoteErrorString = 0;
-			arbCall(task, pthread, (uint64_t*)&remoteErrorString, dlerrorAddr, 0);
+			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
 			char *errorString = copyStringFromTask(task, remoteErrorString);
 			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
 			vm_deallocate(mach_task_self(), (vm_address_t)errorString, strlen(errorString)+1);
 		}
 	}
 
-	thread_terminate(pthread);
+	arbCall(task, pthread, NULL, false, pthread_exitAddr, 0);
+	//thread_terminate(pthread);
 }

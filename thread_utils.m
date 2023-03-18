@@ -105,6 +105,8 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 		kern_return_t kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&stateToObserve.ts_64, &stateToObserveCount);
 		if(kr != KERN_SUCCESS)
 		{
+			if (pcToWait == 0) return kr;
+
 			errCount++;
 			if(errCount >= 5)
 			{
