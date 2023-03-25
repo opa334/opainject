@@ -40,7 +40,7 @@ void iterateImages(task_t task, vm_address_t imageStartPtr, void (^iterateBlock)
 	struct dyld_image_info* infoArray = (struct dyld_image_info*)readProcessMemory(task, (mach_vm_address_t)imageInfos->infoArray, &infoArraySize);
 	if(!infoArray)
 	{
-		vm_deallocate(mach_task_self(), (vm_address_t)infoArray, infoArraySize);
+		//vm_deallocate(mach_task_self(), (vm_address_t)infoArray, infoArraySize);
 		return;
 	}
 

@@ -42,5 +42,5 @@ extern kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, str
 extern void printThreadState_state(struct arm_unified_thread_state threadState);
 extern void printThreadState(thread_act_t thread);
 extern void printThreadInfo(thread_act_t thread);
-extern kern_return_t pause_threads_except_for(task_t task, thread_act_t thread);
-extern kern_return_t resume_threads_except_for(task_t task, thread_act_t thread);
+kern_return_t suspend_threads_except_for(thread_act_array_t allThreads, mach_msg_type_number_t threadCount, thread_act_t exceptForThread);
+kern_return_t resume_threads_except_for(thread_act_array_t allThreads, mach_msg_type_number_t threadCount, thread_act_t exceptForThread);

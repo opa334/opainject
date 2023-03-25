@@ -304,7 +304,12 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 	printf("[arbCall] Set thread state for arbitary call\n");
 	//printThreadState(targetThread);
 
-	pause_threads_except_for(task, targetThread);
+	thread_act_array_t cachedThreads;
+	mach_msg_type_number_t cachedThreadCount;
+	kr = task_threads(task, &cachedThreads, &cachedThreadCount);
+	if (kr != KERN_SUCCESS) return kr;
+
+	suspend_threads_except_for(cachedThreads, cachedThreadCount, targetThread);
 
 	// perform arbitary call
 	thread_resume(targetThread);
@@ -334,7 +339,9 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 		printf("[arbCall] pthread successfully did not return with code %d (%s)\n", kr, mach_error_string(kr));
 	}
 
-	resume_threads_except_for(task, targetThread);
+	resume_threads_except_for(cachedThreads, cachedThreadCount, targetThread);
+
+	vm_deallocate(mach_task_self(), (vm_offset_t)cachedThreads, sizeof(thread_act_array_t) * cachedThreadCount);
 
 	// release fake stack as it's no longer needed
 	vm_deallocate(task, remoteStack, STACK_SIZE);

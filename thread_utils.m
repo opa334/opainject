@@ -132,37 +132,25 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 	return KERN_SUCCESS;
 }
 
-kern_return_t pause_threads_except_for(task_t task, thread_act_t thread)
+kern_return_t suspend_threads_except_for(thread_act_array_t allThreads, mach_msg_type_number_t threadCount, thread_act_t exceptForThread)
 {
-	thread_act_array_t allThreads;
-	mach_msg_type_number_t threadCount;
-	kern_return_t kr = task_threads(task, &allThreads, &threadCount);
-	if (kr != KERN_SUCCESS) return kr;
-
 	for (int i = 0; i < threadCount; i++) {
-		thread_act_t cThread = allThreads[i];
-		if (cThread != thread) {
-			thread_suspend(cThread);
+		thread_act_t thread = allThreads[i];
+		if (thread != exceptForThread) {
+			thread_suspend(thread);
 		}
 	}
-	vm_deallocate(mach_task_self(), (vm_offset_t)allThreads, sizeof(thread_act_array_t) * threadCount);
 	return KERN_SUCCESS;
 }
 
-kern_return_t resume_threads_except_for(task_t task, thread_act_t thread)
+kern_return_t resume_threads_except_for(thread_act_array_t allThreads, mach_msg_type_number_t threadCount, thread_act_t exceptForThread)
 {
-	thread_act_array_t allThreads;
-	mach_msg_type_number_t threadCount;
-	kern_return_t kr = task_threads(task, &allThreads, &threadCount);
-	if (kr != KERN_SUCCESS) return kr;
-
 	for (int i = 0; i < threadCount; i++) {
-		thread_act_t cThread = allThreads[i];
-		if (cThread != thread) {
-			thread_resume(cThread);
+		thread_act_t thread = allThreads[i];
+		if (thread != exceptForThread) {
+			thread_resume(thread);
 		}
 	}
-	vm_deallocate(mach_task_self(), (vm_offset_t)allThreads, sizeof(thread_act_array_t) * threadCount);
 	return KERN_SUCCESS;
 }
 
