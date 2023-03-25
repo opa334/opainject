@@ -132,6 +132,40 @@ kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm
 	return KERN_SUCCESS;
 }
 
+kern_return_t pause_threads_except_for(task_t task, thread_act_t thread)
+{
+	thread_act_array_t allThreads;
+	mach_msg_type_number_t threadCount;
+	kern_return_t kr = task_threads(task, &allThreads, &threadCount);
+	if (kr != KERN_SUCCESS) return kr;
+
+	for (int i = 0; i < threadCount; i++) {
+		thread_act_t cThread = allThreads[i];
+		if (cThread != thread) {
+			thread_suspend(cThread);
+		}
+	}
+	vm_deallocate(mach_task_self(), (vm_offset_t)allThreads, sizeof(thread_act_array_t) * threadCount);
+	return KERN_SUCCESS;
+}
+
+kern_return_t resume_threads_except_for(task_t task, thread_act_t thread)
+{
+	thread_act_array_t allThreads;
+	mach_msg_type_number_t threadCount;
+	kern_return_t kr = task_threads(task, &allThreads, &threadCount);
+	if (kr != KERN_SUCCESS) return kr;
+
+	for (int i = 0; i < threadCount; i++) {
+		thread_act_t cThread = allThreads[i];
+		if (cThread != thread) {
+			thread_resume(cThread);
+		}
+	}
+	vm_deallocate(mach_task_self(), (vm_offset_t)allThreads, sizeof(thread_act_array_t) * threadCount);
+	return KERN_SUCCESS;
+}
+
 void printThreadState_state(struct arm_unified_thread_state threadState)
 {
 	for(int i = 0; i <= 28; i++)

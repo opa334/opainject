@@ -304,6 +304,8 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 	printf("[arbCall] Set thread state for arbitary call\n");
 	//printThreadState(targetThread);
 
+	pause_threads_except_for(task, targetThread);
+
 	// perform arbitary call
 	thread_resume(targetThread);
 	printf("[arbCall] Started thread, waiting for it to finish...\n");
@@ -331,6 +333,8 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 		kr = wait_for_thread(targetThread, 0, &outState);
 		printf("[arbCall] pthread successfully did not return with code %d (%s)\n", kr, mach_error_string(kr));
 	}
+
+	resume_threads_except_for(task, targetThread);
 
 	// release fake stack as it's no longer needed
 	vm_deallocate(task, remoteStack, STACK_SIZE);

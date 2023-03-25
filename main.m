@@ -62,12 +62,18 @@ void spawnPacChild(int argc, char *argv[])
     posix_spawnattr_init(&attr);
 	posix_spawnattr_set_ptrauth_task_port_np(&attr, task);
 
+	uint32_t executablePathSize = 0;
+	_NSGetExecutablePath(NULL, &executablePathSize);
+	char *executablePath = malloc(executablePathSize);
+	_NSGetExecutablePath(executablePath, &executablePathSize);
+
 	int status = -200;
 	pid_t pid;
-	int rc = posix_spawn(&pid, argv[0], NULL, &attr, argsToPass, NULL);
+	int rc = posix_spawn(&pid, executablePath, NULL, &attr, argsToPass, NULL);
 
 	posix_spawnattr_destroy(&attr);
 	free(argsToPass);
+	free(executablePath);
 
 	if(rc != KERN_SUCCESS)
 	{
