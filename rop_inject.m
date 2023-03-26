@@ -92,15 +92,36 @@ void findRopLoop(task_t task, vm_address_t allImageInfoAddr)
 // Create an infinitely spinning pthread in target process
 kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, thread_act_t* remotePthreadOut)
 {
-	// GATHER OFFSETS
+	kern_return_t kr = KERN_SUCCESS;
 
+#if __arm64e__
+	// GET ANY VALID THREAD STATE
+	mach_msg_type_number_t validThreadStateCount = ARM_THREAD_STATE64_COUNT;
+	struct arm_unified_thread_state validThreadState;
+	thread_act_array_t allThreadsForFindingValid;
+	mach_msg_type_number_t threadCountForFindingValid;
+	kr = task_threads(task, &allThreadsForFindingValid, &threadCountForFindingValid);
+	if(kr != KERN_SUCCESS || threadCountForFindingValid == 0)
+	{
+		printf("[createRemotePthread] ERROR: failed to get threads in task: %s\n", mach_error_string(kr));
+		if (kr == KERN_SUCCESS) return 1;
+		return kr;
+	}
+	kr = thread_get_state(allThreadsForFindingValid[0], ARM_THREAD_STATE64, (thread_state_t)&validThreadState.ts_64, &validThreadStateCount);
+	if(kr != KERN_SUCCESS )
+	{
+		printf("[createRemotePthread] ERROR: failed to get valid thread state: %s\n", mach_error_string(kr));
+		return kr;
+	}
+	vm_deallocate(mach_task_self(), (vm_offset_t)allThreadsForFindingValid, sizeof(thread_act_array_t) * threadCountForFindingValid);
+#endif
+
+	// GATHER OFFSETS
 	vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
 	uint64_t pthread_create_from_mach_threadAddr = remoteDlSym(task, libSystemPthreadAddr, "_pthread_create_from_mach_thread");
 
 	// ALLOCATE STACK
-
 	vm_address_t remoteStack64 = (vm_address_t)NULL;
-	kern_return_t kr = KERN_SUCCESS;
 	kr = vm_allocate(task, &remoteStack64, STACK_SIZE, VM_FLAGS_ANYWHERE);
 	if(kr != KERN_SUCCESS)
 	{
@@ -123,13 +144,22 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	// spawn pthread to infinite loop
 	bootstrapThreadState.ash.flavor = ARM_THREAD_STATE64;
 	bootstrapThreadState.ash.count = ARM_THREAD_STATE64_COUNT;
+#if __arm64e__
+	bootstrapThreadState.ts_64.__opaque_flags = validThreadState.ts_64.__opaque_flags;
+#endif
 	uint64_t sp = (remoteStack64 + (STACK_SIZE / 2));
+	uint64_t x2 = ropLoop;
+#if __arm64e__
+	if (!(bootstrapThreadState.ts_64.__opaque_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
+		x2 = (uint64_t)make_sym_callable((void*)x2);
+	}
+#endif
 	__darwin_arm_thread_state64_set_sp(bootstrapThreadState.ts_64, (void*)sp);
 	__darwin_arm_thread_state64_set_pc_fptr(bootstrapThreadState.ts_64, make_sym_callable((void*)pthread_create_from_mach_threadAddr));
 	__darwin_arm_thread_state64_set_lr_fptr(bootstrapThreadState.ts_64, make_sym_callable((void*)ropLoop)); //when done, go to infinite loop
 	bootstrapThreadState.ts_64.__x[0] = sp + 32; // output pthread_t, pointer to stack
 	bootstrapThreadState.ts_64.__x[1] = 0x0; // attributes = NULL
-	bootstrapThreadState.ts_64.__x[2] = (uint64_t)make_sym_callable((void*)ropLoop); // start_routine = infinite loop
+	bootstrapThreadState.ts_64.__x[2] = x2; // start_routine = infinite loop
 	bootstrapThreadState.ts_64.__x[3] = 0x0; // arg = NULL
 
 	//printThreadState_state(bootstrapThreadState);
@@ -164,7 +194,6 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	kr = task_threads(task, &allThreads, &threadCount);
 	if(kr != KERN_SUCCESS)
 	{
-		task_resume(task);
 		printf("[createRemotePthread] ERROR: failed to get threads in task: %s\n", mach_error_string(kr));
 		return kr;
 	}
@@ -278,9 +307,7 @@ kern_return_t arbCall(task_t task, thread_act_t targetThread, uint64_t* retOut, 
 
 	// set state for arb call
 	struct arm_unified_thread_state newState = origThreadState;
-	newState.ash.flavor = ARM_THREAD_STATE64;
-	newState.ash.count = ARM_THREAD_STATE64_COUNT;
-	vm_address_t sp = remoteStack + (STACK_SIZE / 2);
+	uint64_t sp = remoteStack + (STACK_SIZE / 2);
 	__darwin_arm_thread_state64_set_sp(newState.ts_64, (void*)sp);
 	__darwin_arm_thread_state64_set_pc_fptr(newState.ts_64, make_sym_callable((void*)funcPtr));
 	__darwin_arm_thread_state64_set_lr_fptr(newState.ts_64, make_sym_callable((void*)ropLoop));
