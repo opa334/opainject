@@ -13,5 +13,7 @@
 	<true/>
 	<key>com.apple.system-task-ports.control</key>
 	<true/>
+	<key>com.apple.private.thread-set-state</key>
+	<true/>
 </dict>
 </plist>

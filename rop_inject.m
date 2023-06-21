@@ -26,7 +26,10 @@
 #import "pac.h"
 #import "dyld.h"
 #import "sandbox.h"
+#import "CoreSymbolication.h"
+#import "task_utils.h"
 #import "thread_utils.h"
+#import "arm64.h"
 
 vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOut)
 {
@@ -65,24 +68,6 @@ vm_address_t writeStringToTask(task_t task, const char* string, size_t* lengthOu
 	return remoteString;
 }
 
-char *copyStringFromTask(task_t task, vm_address_t stringAddress)
-{
-	extern unsigned char* readProcessMemory(task_t t, mach_vm_address_t addr, mach_msg_type_number_t* size);
-	vm_address_t curAddress = stringAddress;
-	unsigned char buf = -1;
-	while (buf != 0) {
-		mach_msg_type_number_t size = 1;
-		unsigned char *stringBuf = readProcessMemory(task, curAddress, &size);
-		buf = *stringBuf;
-		curAddress++;
-		vm_deallocate(mach_task_self(), (vm_address_t)stringBuf, size);
-	}
-
-	vm_address_t nullByteAddress = curAddress - 1;
-	mach_msg_type_number_t stringSize = nullByteAddress - stringAddress;
-	return (char *)readProcessMemory(task, stringAddress, &stringSize);
-}
-
 void findRopLoop(task_t task, vm_address_t allImageInfoAddr)
 {
 	uint32_t inst = CFSwapInt32(0x00000014);
@@ -117,8 +102,35 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 #endif
 
 	// GATHER OFFSETS
-	vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
-	uint64_t pthread_create_from_mach_threadAddr = remoteDlSym(task, libSystemPthreadAddr, "_pthread_create_from_mach_thread");
+	__unused vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
+
+	uint64_t mainThread = 0;
+	if (@available(iOS 12, *)) {
+		// TODO: maybe instead of this, allocate our own pthread object?
+		// kinda worried about side effects here, but as long our thread doesn't
+		// somehow trigger pthread_main_thread modifications, it should be fine
+		uint64_t pthread_main_thread_np = remoteDlSym(task, libSystemPthreadAddr, "_pthread_main_thread_np");
+
+		uint32_t instructions[2];
+		kr = task_read(task, pthread_main_thread_np, &instructions[0], sizeof(instructions));
+		if (kr != KERN_SUCCESS) {
+			printf("ERROR: Failed to find main thread (1/3)\n");
+			return kr;
+		}
+
+		uint64_t _main_thread_ptr = 0;
+		if (!decode_adrp_ldr(instructions[0], instructions[1], pthread_main_thread_np, &_main_thread_ptr)) {
+			printf("ERROR: Failed to find main thread (2/3)\n");
+			return 1;
+		}
+
+		kr = task_read(task, _main_thread_ptr, &mainThread, sizeof(mainThread));
+		if (kr != KERN_SUCCESS) {
+			printf("ERROR: Failed to find main thread (3/3)\n");
+			return kr;
+		}
+	}
+	uint64_t _pthread_set_self = remoteDlSym(task, libSystemPthreadAddr, "__pthread_set_self");
 
 	// ALLOCATE STACK
 	vm_address_t remoteStack64 = (vm_address_t)NULL;
@@ -148,19 +160,16 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	bootstrapThreadState.ts_64.__opaque_flags = validThreadState.ts_64.__opaque_flags;
 #endif
 	uint64_t sp = (remoteStack64 + (STACK_SIZE / 2));
-	uint64_t x2 = ropLoop;
+	__unused uint64_t x2 = ropLoop;
 #if __arm64e__
 	if (!(bootstrapThreadState.ts_64.__opaque_flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
 		x2 = (uint64_t)make_sym_callable((void*)x2);
 	}
 #endif
 	__darwin_arm_thread_state64_set_sp(bootstrapThreadState.ts_64, (void*)sp);
-	__darwin_arm_thread_state64_set_pc_fptr(bootstrapThreadState.ts_64, make_sym_callable((void*)pthread_create_from_mach_threadAddr));
+	__darwin_arm_thread_state64_set_pc_fptr(bootstrapThreadState.ts_64, make_sym_callable((void*)_pthread_set_self));
 	__darwin_arm_thread_state64_set_lr_fptr(bootstrapThreadState.ts_64, make_sym_callable((void*)ropLoop)); //when done, go to infinite loop
-	bootstrapThreadState.ts_64.__x[0] = sp + 32; // output pthread_t, pointer to stack
-	bootstrapThreadState.ts_64.__x[1] = 0x0; // attributes = NULL
-	bootstrapThreadState.ts_64.__x[2] = x2; // start_routine = infinite loop
-	bootstrapThreadState.ts_64.__x[3] = 0x0; // arg = NULL
+	bootstrapThreadState.ts_64.__x[0] = mainThread;
 
 	//printThreadState_state(bootstrapThreadState);
 
@@ -182,58 +191,8 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	}
 
 	printf("[createRemotePthread] Bootstrap done!\n");
-	kr = thread_terminate(bootstrapThread);
-	if (kr != KERN_SUCCESS) {
-		printf("[createRemotePthread] ERROR terminating bootstrap thread: %s\n", mach_error_string(kr));
-	}
 
-	thread_act_t remotePthread = 0;
-
-	thread_act_array_t allThreads; // gather threads
-	mach_msg_type_number_t threadCount;
-	kr = task_threads(task, &allThreads, &threadCount);
-	if(kr != KERN_SUCCESS)
-	{
-		printf("[createRemotePthread] ERROR: failed to get threads in task: %s\n", mach_error_string(kr));
-		return kr;
-	}
-
-	mach_msg_type_number_t stateToCheckCount = ARM_THREAD_STATE64_COUNT;
-	struct arm_unified_thread_state stateToCheck;
-	for(int i = 0; i < threadCount; i++)
-	{
-		thread_act_t thread = allThreads[i];
-		if(thread == bootstrapThread) continue;
-
-		kr = thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&stateToCheck.ts_64, &stateToCheckCount);
-		if(kr != KERN_SUCCESS)
-		{
-			printf("[createRemotePthread] WARNING: failed to get thread state of thread %d when trying to find pthread, error: %s (%d)\n", thread, mach_error_string(kr), kr);
-			continue;
-		}
-
-		// the spinning thread is our new pthread
-		uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(stateToCheck.ts_64);
-		if(pc == ropLoop) 
-		{
-			remotePthread = thread;
-		}
-	}
-
-	vm_deallocate(mach_task_self(), (vm_offset_t)allThreads, sizeof(thread_act_array_t) * threadCount);
-
-	if(!remotePthread)
-	{
-		printf("[createRemotePthread] ERROR: Failed to find pthread\n");
-		return -1;
-	}
-
-	printf("[createRemotePthread] Found pthread: %d\n", remotePthread);
-
-	if(remotePthreadOut)
-	{
-		*remotePthreadOut = remotePthread;
-	}
+	if(remotePthreadOut) *remotePthreadOut = bootstrapThread;
 
 	return kr;
 }
@@ -407,34 +366,55 @@ void prepareForMagic(task_t task, vm_address_t allImageInfoAddr)
 
 bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
 {
-	int sandboxExtensionNeeded = sandbox_check(pid, "file-read-data", SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, dylibPath);
-	if(!sandboxExtensionNeeded)
-	{
-		printf("[sandboxFixup] not needed, bailing out.\n");
-		return YES;
+	int readExtensionNeeded = sandbox_check(pid, "file-read-data", SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, dylibPath);
+	int executableExtensionNeeded = sandbox_check(pid, "file-map-executable", SANDBOX_FILTER_PATH | SANDBOX_CHECK_NO_REPORT, dylibPath);
+
+	int retval = 0;
+	vm_address_t libSystemSandboxAddr = 0;
+	uint64_t sandbox_extension_consumeAddr = 0;
+	if (readExtensionNeeded || executableExtensionNeeded) {
+		libSystemSandboxAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_sandbox.dylib");
+		sandbox_extension_consumeAddr = remoteDlSym(task, libSystemSandboxAddr, "_sandbox_extension_consume");
+		printf("[sandboxFixup] applying sandbox extension(s)! sandbox_extension_consume: 0x%llX\n", sandbox_extension_consumeAddr);
 	}
 
-	vm_address_t libSystemSandboxAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_sandbox.dylib");
-	uint64_t sandbox_extension_consumeAddr = remoteDlSym(task, libSystemSandboxAddr, "_sandbox_extension_consume");
+	if (readExtensionNeeded) {
+		char* extString = sandbox_extension_issue_file(APP_SANDBOX_READ, dylibPath, 0);
+		size_t remoteExtStringSize = 0;
+		vm_address_t remoteExtString = writeStringToTask(task, (const char*)extString, &remoteExtStringSize);
+		if(remoteExtString)
+		{
+			int64_t readExtensionRet = 0;
+			arbCall(task, pthread, (uint64_t*)&readExtensionRet, true, sandbox_extension_consumeAddr, 1, remoteExtString);
+			vm_deallocate(task, remoteExtString, remoteExtStringSize);
 
-	printf("[sandboxFixup] applying sandbox extension! sandbox_extension_consume: 0x%llX\n", sandbox_extension_consumeAddr);
-
-	// APPLY SANDBOX EXTENSION FOR DYLIB PATH 
-	char* extString = sandbox_extension_issue_file(APP_SANDBOX_READ, dylibPath, 0);
-	size_t remoteExtStringSize = 0;
-	vm_address_t remoteExtString = writeStringToTask(task, (const char*)extString, &remoteExtStringSize);
-	if(remoteExtString)
-	{
-		int64_t sandbox_extension_consume_ret = 0;
-		arbCall(task, pthread, (uint64_t*)&sandbox_extension_consume_ret, true, sandbox_extension_consumeAddr, 1, remoteExtString);
-		vm_deallocate(task, remoteExtString, remoteExtStringSize);
-
-		printf("[sandboxFixup] sandbox_extension_consume returned %lld\n", (int64_t)sandbox_extension_consume_ret);
-
-		return sandbox_extension_consume_ret == 1;
+			printf("[sandboxFixup] sandbox_extension_consume returned %lld for read extension\n", (int64_t)readExtensionRet);
+			retval |= (readExtensionRet <= 0);
+		}
+	}
+	else {
+		printf("[sandboxFixup] read extension not needed, skipping...\n");
 	}
 
-	return NO;
+	if (executableExtensionNeeded) {
+		char* extString = sandbox_extension_issue_file("com.apple.sandbox.executable", dylibPath, 0);
+		size_t remoteExtStringSize = 0;
+		vm_address_t remoteExtString = writeStringToTask(task, (const char*)extString, &remoteExtStringSize);
+		if(remoteExtString)
+		{
+			int64_t executableExtensionRet = 0;
+			arbCall(task, pthread, (uint64_t*)&executableExtensionRet, true, sandbox_extension_consumeAddr, 1, remoteExtString);
+			vm_deallocate(task, remoteExtString, remoteExtStringSize);
+
+			printf("[sandboxFixup] sandbox_extension_consume returned %lld for executable extension\n", (int64_t)executableExtensionRet);
+			retval |= (executableExtensionRet <= 0);
+		}
+	}
+	else {
+		printf("[sandboxFixup] executable extension not needed, skipping...\n");
+	}
+
+	return retval == 0;
 }
 
 void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)
@@ -453,8 +433,6 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 	vm_address_t libDyldAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libdyld.dylib");
 	uint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
 	uint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
-	vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
-	uint64_t pthread_exitAddr = remoteDlSym(task, libSystemPthreadAddr, "_pthread_exit");
 
 	printf("[injectDylibViaRop] dlopen: 0x%llX, dlerror: 0x%llX\n", (unsigned long long)dlopenAddr, (unsigned long long)dlerrorAddr);
 
@@ -473,12 +451,11 @@ void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address
 		else {
 			uint64_t remoteErrorString = 0;
 			arbCall(task, pthread, (uint64_t*)&remoteErrorString, true, dlerrorAddr, 0);
-			char *errorString = copyStringFromTask(task, remoteErrorString);
+			char *errorString = task_copy_string(task, remoteErrorString);
 			printf("[injectDylibViaRop] dlopen failed, error:\n%s\n", errorString);
-			vm_deallocate(mach_task_self(), (vm_address_t)errorString, strlen(errorString)+1);
+			free(errorString);
 		}
 	}
 
-	arbCall(task, pthread, NULL, false, pthread_exitAddr, 0);
-	//thread_terminate(pthread);
+	thread_terminate(pthread);
 }

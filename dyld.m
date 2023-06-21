@@ -12,57 +12,32 @@
 #import <sys/utsname.h>
 #import <string.h>
 #import <limits.h>
+#import "task_utils.h"
 
 #import <CoreFoundation/CoreFoundation.h>
 
-unsigned char* readProcessMemory(task_t t, mach_vm_address_t addr, mach_msg_type_number_t* size)
-{
-    mach_msg_type_number_t  dataCnt = (mach_msg_type_number_t) *size;
-    vm_offset_t readMem = 0;
-
-	kern_return_t kr = vm_read(t, addr, *size, &readMem, &dataCnt);
-	if (kr != KERN_SUCCESS)
-	{
-		return NULL;
-	}
-
-    return (unsigned char *)readMem;
-}
-
 void iterateImages(task_t task, vm_address_t imageStartPtr, void (^iterateBlock)(char*, struct dyld_image_info*, BOOL*))
 {
-	mach_msg_type_number_t imageInfosSize = sizeof(struct dyld_all_image_infos);
-	struct dyld_all_image_infos* imageInfos = (struct dyld_all_image_infos*)readProcessMemory(task, imageStartPtr, &imageInfosSize);
+	struct dyld_all_image_infos imageInfos;
+	task_read(task, imageStartPtr, &imageInfos, sizeof(imageInfos));
 
-	if(!imageInfos) return;
+	size_t infoArraySize = sizeof(struct dyld_image_info) * imageInfos.infoArrayCount;
+	struct dyld_image_info *infoArray = malloc(infoArraySize);
+	task_read(task, (vm_address_t)imageInfos.infoArray, &infoArray[0], infoArraySize);
 
-	mach_msg_type_number_t infoArraySize = sizeof(struct dyld_image_info) * imageInfos->infoArrayCount;
-	struct dyld_image_info* infoArray = (struct dyld_image_info*)readProcessMemory(task, (mach_vm_address_t)imageInfos->infoArray, &infoArraySize);
-	if(!infoArray)
-	{
-		//vm_deallocate(mach_task_self(), (vm_address_t)infoArray, infoArraySize);
-		return;
-	}
-
-	for(int i=0; i < imageInfos->infoArrayCount; i++)
+	for(int i = 0; i < imageInfos.infoArrayCount; i++)
 	{
 		@autoreleasepool
 		{
-			mach_msg_type_number_t imagePathSize = PATH_MAX;
-			char* itImagePath = (char*)readProcessMemory(task, (mach_vm_address_t)infoArray[i].imageFilePath, &imagePathSize);
-
-			if(itImagePath)
+			char currentImagePath[PATH_MAX];
+			if(task_read(task, (vm_address_t)infoArray[i].imageFilePath, &currentImagePath[0], sizeof(currentImagePath)) == KERN_SUCCESS)
 			{
 				BOOL stop = NO;
-				iterateBlock(itImagePath, &infoArray[i], &stop);
+				iterateBlock(currentImagePath, &infoArray[i], &stop);
 				if(stop) break;
-				vm_deallocate(mach_task_self(), (vm_address_t)itImagePath, imagePathSize);
 			}
 		}
 	}
-
-	vm_deallocate(mach_task_self(), (vm_address_t)infoArray, infoArraySize);
-	vm_deallocate(mach_task_self(), (vm_address_t)imageInfos, imageInfosSize);
 }
 
 vm_address_t getRemoteImageAddress(task_t task, vm_address_t imageStartPtr, const char* imagePath)
@@ -80,129 +55,117 @@ vm_address_t getRemoteImageAddress(task_t task, vm_address_t imageStartPtr, cons
 	return outAddr;
 }
 
-void iterateLoadCommands(task_t task, vm_address_t imageAddress, void (^iterateBlock)(const struct segment_command_64*, vm_address_t, BOOL*))
+void iterateLoadCommands(task_t task, vm_address_t imageAddress, void (^iterateBlock)(const struct load_command* cmd, vm_address_t cmdAddress, BOOL* stop))
 {
-	mach_msg_type_number_t mh_size = sizeof(struct mach_header_64);
-	struct mach_header_64* mh = (struct mach_header_64*)readProcessMemory(task, imageAddress, &mh_size);
+	struct mach_header_64 mh;
+	task_read(task, imageAddress, &mh, sizeof(mh));
 
-	vm_address_t addr = (imageAddress + sizeof(struct mach_header_64));
-	vm_address_t endAddr = addr + mh->sizeofcmds;
+	vm_address_t lcStart = (imageAddress + sizeof(struct mach_header_64));
+	vm_address_t lcEnd = lcStart + mh.sizeofcmds;
 
-	for(int ci = 0; ci < mh->ncmds && addr <= endAddr; ci++)
+	vm_address_t lcCur = lcStart;
+	for(int ci = 0; ci < mh.ncmds && lcCur <= lcEnd; ci++)
 	{
-		mach_msg_type_number_t cmd_size = sizeof(struct segment_command_64);
-		struct segment_command_64* cmd = (struct segment_command_64*)readProcessMemory(task, addr, &cmd_size);
+		struct load_command loadCommand;
+		task_read(task, lcCur, &loadCommand, sizeof(loadCommand));
 		BOOL stop = NO;
-		iterateBlock(cmd, addr, &stop);
-		addr = addr + cmd->cmdsize;
-		vm_deallocate(mach_task_self(), (vm_address_t)cmd, cmd_size);
+		iterateBlock(&loadCommand, lcCur, &stop);
+		lcCur = lcCur + loadCommand.cmdsize;
 		if(stop) break;
 	}
-
-	vm_deallocate(mach_task_self(), (vm_address_t)mh, mh_size);
 }
 
 void iterateSections(task_t task, vm_address_t commandAddress, const struct segment_command_64* segmentCommand, void (^iterateBlock)(const struct section_64*, BOOL*))
 {
 	if(segmentCommand->nsects == 0) return;
 
-	vm_address_t startAddr = commandAddress + sizeof(struct segment_command_64);
-	mach_msg_type_number_t sectArrSize = sizeof(struct section_64) * segmentCommand->nsects;
-	struct section_64* sectArr = (struct section_64*)readProcessMemory(task, startAddr, &sectArrSize);
-
+	vm_address_t sectionStart = commandAddress + sizeof(struct segment_command_64);
 	for(int i = 0; i < segmentCommand->nsects; i++)
 	{
-		struct section_64* sect = &sectArr[i];
-		BOOL stop;
-		iterateBlock(sect, &stop);
-		if(stop) break;
+		struct section_64 section = { 0 };
+		if (task_read(task, sectionStart + i * sizeof(section), &section, sizeof(section)) == KERN_SUCCESS) {
+			BOOL stop;
+			iterateBlock(&section, &stop);
+			if(stop) break;
+		}
 	}
-
-	vm_deallocate(mach_task_self(), (vm_address_t)sectArr, sectArrSize);
 }
 
 void iterateSymbols(task_t task, vm_address_t imageAddress, void (^iterateBlock)(const char*, const char*, vm_address_t, BOOL*))
 {
-	__block mach_msg_type_number_t __linkedit_size = sizeof(struct segment_command_64);
-	__block mach_msg_type_number_t symtab_cmd_size = sizeof(struct symtab_command);
-	__block struct segment_command_64* __linkedit = NULL;
-	__block struct symtab_command* symtabCommand = NULL;
-	__block mach_msg_type_number_t strtbl_size;
+	__block struct segment_command_64 __linkedit = { 0 };
+	__block struct symtab_command symtabCommand = { 0 };
 
 	__block vm_address_t slide;
-	__block BOOL firstCmd = YES;
+	__block BOOL firstSegmentCommand = YES;
 
-	iterateLoadCommands(task, imageAddress, ^(const struct segment_command_64* cmd, vm_address_t cmdAddr, BOOL* stop)
+	iterateLoadCommands(task, imageAddress, ^(const struct load_command* cmd, vm_address_t cmdAddress, BOOL* stop)
 	{
-		if(firstCmd)
-		{
-			slide = imageAddress - cmd->vmaddr;
-			firstCmd = NO;
-		}
-
 		switch(cmd->cmd)
 		{
 			case LC_SYMTAB:
 			{
-				symtabCommand = (struct symtab_command*)readProcessMemory(task, cmdAddr, &symtab_cmd_size);
+				task_read(task, cmdAddress, &symtabCommand, sizeof(symtabCommand));
 				break;
 			}
 
 			case LC_SEGMENT_64:
 			{
-				if (strncmp("__LINKEDIT", cmd->segname, 16) == 0) {
-					
-					__linkedit = (struct segment_command_64*)readProcessMemory(task, cmdAddr, &__linkedit_size);;
+				struct segment_command_64 segmentCommand;
+				task_read(task, cmdAddress, &segmentCommand, sizeof(segmentCommand));
+				if(firstSegmentCommand) {
+					slide = imageAddress - segmentCommand.vmaddr;
+					firstSegmentCommand = NO;
+				}
+				if (strncmp("__LINKEDIT", segmentCommand.segname, 16) == 0) {
+					__linkedit = segmentCommand;
 				}
 				break;
 			}
 		}
 	});
 
-	if(!__linkedit)
+	if(__linkedit.cmd != LC_SEGMENT_64)
 	{
 		printf("ERROR: __LINKEDIT not found\n");
 		return;
 	}
-	if(!symtabCommand)
+	if(symtabCommand.cmd != LC_SYMTAB)
 	{
 		printf("ERROR: symtab command not found\n");
 		return;
 	}
 
-	uint64_t fileoff = __linkedit->fileoff;
-	uint64_t vmaddr = __linkedit->vmaddr;
+	uint64_t fileoff = __linkedit.fileoff;
+	uint64_t vmaddr = __linkedit.vmaddr;
 
 	vm_address_t baseAddr = vmaddr + slide - fileoff;
-	vm_deallocate(mach_task_self(), (vm_address_t)__linkedit, __linkedit_size);
 
-	vm_address_t strtblAddr = baseAddr + symtabCommand->stroff;
-	strtbl_size = symtabCommand->strsize;
-	char* strtbl = (char*)readProcessMemory(task, strtblAddr, &strtbl_size);
-
-	vm_address_t lAddr = baseAddr + symtabCommand->symoff;
-	for (uint32_t s = 0; s < symtabCommand->nsyms; s++)
+	vm_address_t strtblAddr = baseAddr + symtabCommand.stroff;
+	size_t strtblSize = symtabCommand.strsize;
+	char *strtbl = malloc(strtblSize);
+	task_read(task, strtblAddr, &strtbl[0], strtblSize);
+	vm_address_t lAddr = baseAddr + symtabCommand.symoff;
+	for (uint32_t s = 0; s < symtabCommand.nsyms; s++)
 	{
 		vm_address_t entryAddr = lAddr + sizeof(struct nlist_64) * s;
 
-		mach_msg_type_number_t entry_size = sizeof(struct nlist_64);
-		struct nlist_64* entry = (struct nlist_64*)readProcessMemory(task, entryAddr, &entry_size);
+		struct nlist_64 entry = { 0 };
+		task_read(task, entryAddr, &entry, sizeof(entry));
 
-		uint32_t off = entry->n_un.n_strx;
-		if (off >= strtbl_size || off == 0) {
-			vm_deallocate(mach_task_self(), (vm_address_t)entry, entry_size);
+		uint32_t off = entry.n_un.n_strx;
+		if (off >= strtblSize || off == 0) {
 			continue;
 		}
 
 		const char* sym = &strtbl[off];
 		if (sym[0] == '\x00')
 		{
-			vm_deallocate(mach_task_self(), (vm_address_t)entry, entry_size);
 			continue;
 		}
 
 		const char* type = NULL;
-		switch(entry->n_type & N_TYPE) {
+		switch(entry.n_type & N_TYPE) {
 			case N_UNDF: type = "N_UNDF"; break;
 			case N_ABS:  type = "N_ABS"; break;
 			case N_SECT: type = "N_SECT"; break;
@@ -211,19 +174,14 @@ void iterateSymbols(task_t task, vm_address_t imageAddress, void (^iterateBlock)
 		}
 
 		BOOL stop = NO;
-		iterateBlock(sym, type, entry->n_value + slide, &stop);
-		vm_deallocate(mach_task_self(), (vm_address_t)entry, entry_size);
+		iterateBlock(sym, type, entry.n_value + slide, &stop);
 		if(stop)
 		{
 			break;
 		}
 	}
 
-	if(symtabCommand)
-	{
-		vm_deallocate(mach_task_self(), (vm_address_t)symtabCommand, symtab_cmd_size);
-	}
-	vm_deallocate(mach_task_self(), (vm_address_t)strtbl, strtbl_size);
+	free(strtbl);
 }
 
 vm_address_t remoteDlSym(task_t task, vm_address_t imageAddress, const char* symbolName)
@@ -295,17 +253,13 @@ vm_address_t scanMemory(task_t task, vm_address_t begin, size_t size, char* memo
 {
 	//printf("scanMemory(%llX, %ld)\n", (uint64_t)begin, size);
 
-	mach_msg_type_number_t chunkSize = size;
 	if(alignment == 0) alignment = 1;
 
-	unsigned char* buf = readProcessMemory(task, begin, &chunkSize);
-	if(!buf || (size != chunkSize))
+	unsigned char *buf = malloc(size);
+	if(task_read(task, begin, &buf[0], size) != KERN_SUCCESS)
 	{
 		printf("[scanMemory] WARNING: Failed to read process memory (%llX, size:%llX)\n", (uint64_t)begin, (uint64_t)size);
-		if(buf)
-		{
-			vm_deallocate(mach_task_self(), (vm_address_t)buf, chunkSize);
-		}
+		if(buf) free(buf);
 		return 0;
 	}
 
@@ -333,7 +287,7 @@ vm_address_t scanMemory(task_t task, vm_address_t begin, size_t size, char* memo
 		break;
 	}
 
-	vm_deallocate(mach_task_self(), (vm_address_t)buf, chunkSize);
+	free(buf);
 	return foundMemoryAbsoluteFinal;
 }
 
@@ -369,20 +323,22 @@ vm_address_t scanLibrariesForMemory(task_t task, vm_address_t imageStartPtr, cha
 	iterateImages(task, imageStartPtr, ^(char* imageFilePath, struct dyld_image_info* imageInfo, BOOL* stopImages)
 	{
 		__block vm_address_t slide;
-		__block BOOL firstCmd = YES;
+		__block BOOL firstSegmentCommand = YES;
 		//printf("- iterating %s -\n", imageFilePath);
-		iterateLoadCommands(task, (vm_address_t)imageInfo->imageLoadAddress, ^(const struct segment_command_64* cmd, vm_address_t addr, BOOL* stopCommands)
+		iterateLoadCommands(task, (vm_address_t)imageInfo->imageLoadAddress, ^(const struct load_command* cmd, vm_address_t cmdAddress, BOOL* stopCommands)
 		{
-			if(firstCmd)
-			{
-				slide = (vm_address_t)imageInfo->imageLoadAddress - cmd->vmaddr;
-				firstCmd = NO;
-			}
 			if(cmd->cmd == LC_SEGMENT_64)
 			{
-				if (strncmp("__TEXT", cmd->segname, 16) == 0)
+				struct segment_command_64 segmentCommand = { 0 };
+				task_read(task, cmdAddress, &segmentCommand, sizeof(segmentCommand));
+				if(firstSegmentCommand)
 				{
-					vm_address_t addrIfFound = scanTextSegmentForMemory(task, addr, cmd, slide, memory, memorySize, alignment);
+					slide = (vm_address_t)imageInfo->imageLoadAddress - segmentCommand.vmaddr;
+					firstSegmentCommand = NO;
+				}
+				if (strncmp("__TEXT", segmentCommand.segname, 16) == 0)
+				{
+					vm_address_t addrIfFound = scanTextSegmentForMemory(task, cmdAddress, &segmentCommand, slide, memory, memorySize, alignment);
 					if(addrIfFound != 0)
 					{
 						foundAddr = addrIfFound;
