@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 uint32_t generate_movk(uint8_t x, uint16_t val, uint16_t lsl);
 uint32_t generate_br(uint8_t x);
