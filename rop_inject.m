@@ -73,6 +73,19 @@ void findRopLoop(task_t task, vm_address_t allImageInfoAddr)
 	uint32_t inst = CFSwapInt32(0x00000014);
 	ropLoop = (uint64_t)scanLibrariesForMemory(task, allImageInfoAddr, (char*)&inst, sizeof(inst), 4);
 }
+// theos on wsl2 ubuntu cannot build with @available option, this workaround to make it work
+bool isiOS12OrLater() {
+    int mib[2] = { CTL_KERN, KERN_OSVERSION };
+    char str[256];
+    size_t size = sizeof(str);
+
+    sysctl(mib, 2, str, &size, NULL, 0);
+
+    int majorVersion = 0;
+    sscanf(str, "%d", &majorVersion);
+
+    return majorVersion >= 16;  // iOS 12 corresponds to Darwin version 18.x.x
+}
 
 // Create an infinitely spinning pthread in target process
 kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, thread_act_t* remotePthreadOut)
@@ -105,7 +118,7 @@ kern_return_t createRemotePthread(task_t task, vm_address_t allImageInfoAddr, th
 	__unused vm_address_t libSystemPthreadAddr = getRemoteImageAddress(task, allImageInfoAddr, "/usr/lib/system/libsystem_pthread.dylib");
 
 	uint64_t mainThread = 0;
-	if (@available(iOS 12, *)) {
+	if (isiOS12OrLater()) {
 		// TODO: maybe instead of this, allocate our own pthread object?
 		// kinda worried about side effects here, but as long our thread doesn't
 		// somehow trigger pthread_main_thread modifications, it should be fine
