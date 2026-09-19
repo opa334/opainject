@@ -2,9 +2,15 @@
 #import <stdlib.h>
 #import "pac.h"
 
+static uint64_t __attribute((naked)) __xpaci(uint64_t a)
+{
+    asm(".long        0xDAC143E0"); // XPACI X0
+    asm("ret");
+}
+
 kern_return_t task_read(task_t task, vm_address_t address, void *outBuf, vm_size_t size)
 {
-	address = (vm_address_t)make_sym_readable_data((void *)address);
+	address = (vm_address_t)__xpaci(address);
 	size_t maxSize = size;
 	kern_return_t kr = vm_read_overwrite(task, address, size, (vm_address_t)outBuf, &maxSize);
 	if (kr == KERN_SUCCESS) {
