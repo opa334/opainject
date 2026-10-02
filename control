@@ -1,9 +1,0 @@
-Package: com.opa334.opainject
-Name: opainject
-Version: 1.0.6
-Architecture: iphoneos-arm
-Description: Injection tool!
-Maintainer: opa334
-Author: opa334
-Section: System
-Tag: role::hacker

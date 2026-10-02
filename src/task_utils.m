@@ -1,11 +1,11 @@
 #import <mach/mach.h>
 #import <stdlib.h>
-#import "pac.h"
+#import <pac.h>
 
 static uint64_t __attribute((naked)) __xpaci(uint64_t a)
 {
 #if __has_feature(ptrauth_calls)
-    asm(".long        0xDAC143E0"); // XPACI X0
+	asm("xpaci x0");
 #endif
     asm("ret");
 }

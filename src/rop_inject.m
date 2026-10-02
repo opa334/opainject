@@ -23,10 +23,10 @@
 #import <sys/wait.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-#import "pac.h"
+#import <pac.h>
 #import "dyld.h"
-#import "sandbox.h"
-#import "CoreSymbolication.h"
+#import <sandbox.h>
+#import <CoreSymbolication/CoreSymbolication.h>
 #import "task_utils.h"
 #import "thread_utils.h"
 #import "arm64.h"

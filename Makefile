@@ -1,14 +1,15 @@
-TARGET := iphone:clang:16.5:11.0
-ARCHS = arm64 arm64e
+TARGET = opainject
 
-include $(THEOS)/makefiles/common.mk
+CC = clang
 
-TOOL_NAME = opainject
+CFLAGS = -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=11.0 -fobjc-arc -Iprivate/include
+LDFLAGS = 
 
-opainject_FILES = main.m dyld.m shellcode_inject.m rop_inject.m thread_utils.m task_utils.m arm64.m
-opainject_CFLAGS = -fobjc-arc -DTHEOS_LEAN_AND_MEAN
-opainject_CODESIGN_FLAGS = -Sentitlements.plist
-opainject_INSTALL_PATH = /usr/local/bin
-opainject_PRIVATE_FRAMEWORKS = CoreSymbolication
+sign: $(TARGET)
+	@ldid -Cadhoc -Sentitlements.plist $<
 
-include $(THEOS_MAKE_PATH)/tool.mk
+$(TARGET): $(wildcard src/*.m)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+clean:
+	@rm -f $(TARGET)
