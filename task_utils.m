@@ -4,7 +4,9 @@
 
 static uint64_t __attribute((naked)) __xpaci(uint64_t a)
 {
+#if __has_feature(ptrauth_calls)
     asm(".long        0xDAC143E0"); // XPACI X0
+#endif
     asm("ret");
 }
 
